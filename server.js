@@ -1,6 +1,10 @@
+require('dotenv').config();
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
+const Stripe = require('stripe');
+const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+
 
 const app = express();
 app.use(cors());
@@ -118,27 +122,27 @@ app.post("/api/pickups", (req, res) => {
   );
 });
 
-// app.post("/api/checkout", async (req, res) => {
-//   const { amount, currency = "usd", paymentMethodId } = req.body;
-//   if (!amount || !paymentMethodId) {
-//     return res.status(400).json({ error: "Amount and paymentMethodId are required." });
-//   }
-//   try {
-//     const paymentIntent = await stripe.paymentIntents.create({
-//       amount, // amount in cents
-//       currency,
-//       payment_method: paymentMethodId,
-//       confirm: true,
-//       return_url: "http://localhost:3000/confirmation", // Add this line
-//       automatic_payment_methods: {
-//         enabled: true
-//       }
-//     });
-//     res.json({ success: true, message: "Payment successful", paymentIntent });
-//   } catch (err) {
-//     res.status(400).json({ success: false, error: err.message });
-//   }
-// });
+app.post("/api/checkout", async (req, res) => {
+  const { amount, currency = "usd", paymentMethodId } = req.body;
+  if (!amount || !paymentMethodId) {
+    return res.status(400).json({ error: "Amount and paymentMethodId are required." });
+  }
+  try {
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount, // amount in cents
+      currency,
+      payment_method: paymentMethodId,
+      confirm: true,
+      return_url: "http://localhost:3000/confirmation", // Add this line
+      automatic_payment_methods: {
+        enabled: true
+      }
+    });
+    res.json({ success: true, message: "Payment successful", paymentIntent });
+  } catch (err) {
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
 
 app.listen(3002, () => {
   console.log("Server running on http://localhost:3002");
