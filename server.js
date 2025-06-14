@@ -2,6 +2,8 @@ require('dotenv').config();
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
+const nodemailer = require('nodemailer');
+//const transporter = nodemailer.createTransport({ /* SMTP config */ });
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 
@@ -138,6 +140,63 @@ app.post("/api/checkout", async (req, res) => {
         enabled: true
       }
     });
+   
+    let testAccount = await nodemailer.createTestAccount();
+
+    
+    let transporter = nodemailer.createTransport({
+      host: testAccount.smtp.host,
+      port: testAccount.smtp.port,
+      secure: testAccount.smtp.secure,
+      auth: {
+        user: testAccount.user,
+        pass: testAccount.pass,
+      },
+    });
+
+    
+    let info = await transporter.sendMail({
+      from: '"Test" <test@example.com>',
+      to: "recipient@example.com",
+      subject: "Order Confirmation",
+      text: `Thank you for your order! Your payment of ${amount / 100} ${currency.toUpperCase()} was successful.`,
+    });
+
+    console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info));
+//    const transporter = nodemailer.createTransport({
+//   host: 'smtp.mail.com',
+//   port: 465,
+//   secure: true, // true for port 465, false for 587
+//   auth: {
+//     user: process.env.EMAIL_USER, // your email address
+//     pass: process.env.EMAIL_PASS, // your email password
+//   },
+// });
+
+// transporter.verify(function(error, success) {
+//   if (error) {
+//     console.log('Error:', error);
+//   } else {
+//     console.log('Server is ready to take our messages');
+//   }
+// });
+
+// const mailOptions = {
+//   from: process.env.EMAIL_USER, // sender address
+//   to: 'recipient@example.com', // list of receivers
+//   subject: 'Order Confirmation', // Subject line
+//   text: `Thank you for your order! Your payment of ${amount / 100} ${currency.toUpperCase()} was successful.`, // plain text body
+//   // html: '<b>Hello world?</b>' // html body
+// };
+
+// transporter.sendMail(mailOptions, (error, info) => {
+//   if (error) {
+//     console.error('Error sending email:', error);
+//   } else {
+//     console.log('Email sent successfully:', info.response);
+//   }
+// });
+
     res.json({ success: true, message: "Payment successful", paymentIntent });
   } catch (err) {
     res.status(400).json({ success: false, error: err.message });
