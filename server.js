@@ -6,6 +6,7 @@ const nodemailer = require('nodemailer');
 //const transporter = nodemailer.createTransport({ /* SMTP config */ });
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
+const twilio = require('twilio');
 
 
 const app = express();
@@ -60,13 +61,26 @@ app.post("/api/signin", (req, res) => {
     if (results.length === 0) {
       return res.status(401).json({ error: "Invalid credentials." });
     }
-    res.json({ 
-      message: "Sign in successful", 
+
+    const user = results[0];
+    const isFirstVisit = !user.has_visited;
+
+    // Update has_visited to true if it's the first visit
+    if (isFirstVisit) {
+      db.query(
+        "UPDATE users SET has_visited = TRUE WHERE id = ?",
+        [user.id]
+      );
+    }
+
+    res.json({
+      message: "Sign in successful",
       user: {
-        id: results[0].id,
-        name: results[0].name,
-        email: results[0].email,
-        phone: results[0].phone
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        isFirstVisit
       },
       success: true
     });
@@ -125,77 +139,56 @@ app.post("/api/pickups", (req, res) => {
 });
 
 app.post("/api/checkout", async (req, res) => {
-  const { amount, currency = "usd", paymentMethodId } = req.body;
+  const { amount, currency = "usd", paymentMethodId, phone } = req.body;
   if (!amount || !paymentMethodId) {
     return res.status(400).json({ error: "Amount and paymentMethodId are required." });
   }
   try {
     const paymentIntent = await stripe.paymentIntents.create({
-      amount, // amount in cents
+      amount,
       currency,
       payment_method: paymentMethodId,
       confirm: true,
-      return_url: "http://localhost:3000/confirmation", // Add this line
-      automatic_payment_methods: {
-        enabled: true
-      }
-    });
-   
-    let testAccount = await nodemailer.createTestAccount();
-
-    
-    let transporter = nodemailer.createTransport({
-      host: testAccount.smtp.host,
-      port: testAccount.smtp.port,
-      secure: testAccount.smtp.secure,
-      auth: {
-        user: testAccount.user,
-        pass: testAccount.pass,
-      },
+      return_url: "http://localhost:3000/confirmation",
+      automatic_payment_methods: { enabled: true }
     });
 
-    
-    let info = await transporter.sendMail({
-      from: '"Test" <test@example.com>',
-      to: "recipient@example.com",
-      subject: "Order Confirmation",
-      text: `Thank you for your order! Your payment of ${amount / 100} ${currency.toUpperCase()} was successful.`,
-    });
+    // Send SMS notification with Twilio
+    if (phone) {
+      const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+      await client.messages.create({
+        body: 'Payment successful! Thank you for your order.',
+        from: process.env.TWILIO_PHONE_NUMBER,
+        to: phone
+      });
+      console.log('SMS notification sent to', phone);
+    }
 
-    console.log("Preview URL: %s", nodemailer.getTestMessageUrl(info));
-//    const transporter = nodemailer.createTransport({
-//   host: 'smtp.mail.com',
-//   port: 465,
-//   secure: true, // true for port 465, false for 587
-//   auth: {
-//     user: process.env.EMAIL_USER, // your email address
-//     pass: process.env.EMAIL_PASS, // your email password
-//   },
-// });
+    const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.EMAIL_USER,      // your Outlook email
+    pass: process.env.EMAIL_PASS,      // your app password
+  },
+});
 
-// transporter.verify(function(error, success) {
-//   if (error) {
-//     console.log('Error:', error);
-//   } else {
-//     console.log('Server is ready to take our messages');
-//   }
-// });
+const mailOptions = {
+  from: process.env.EMAIL_USER, // replace with your Outlook email
+  to: 'riseaboveamg@gmail.com',
+  subject: 'Test Email from Nodemailer',
+  text: 'Hello! This is a test email sent using Nodemailer and Outlook 365.',
+};
 
-// const mailOptions = {
-//   from: process.env.EMAIL_USER, // sender address
-//   to: 'recipient@example.com', // list of receivers
-//   subject: 'Order Confirmation', // Subject line
-//   text: `Thank you for your order! Your payment of ${amount / 100} ${currency.toUpperCase()} was successful.`, // plain text body
-//   // html: '<b>Hello world?</b>' // html body
-// };
+transporter.sendMail(mailOptions, (error, info) => {
+  if (error) {
+    return console.error('Error sending email:', error);
+  }
+  console.log('Email sent successfully:', info.response);
+});
 
-// transporter.sendMail(mailOptions, (error, info) => {
-//   if (error) {
-//     console.error('Error sending email:', error);
-//   } else {
-//     console.log('Email sent successfully:', info.response);
-//   }
-// });
+
+
+
 
     res.json({ success: true, message: "Payment successful", paymentIntent });
   } catch (err) {
