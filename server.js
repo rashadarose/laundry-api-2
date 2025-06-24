@@ -14,6 +14,7 @@ app.use(cors());
 app.use(express.json());
 
 // Update with your actual credentials
+if (process.env.NODE_ENV !== 'development-skip-db') {
 const db = mysql.createConnection({
   host: "localhost",
   user: "root",
@@ -21,6 +22,14 @@ const db = mysql.createConnection({
   database: "laundryapp",
   port: 3306, // explicitly set the port
 });
+
+ connection.connect(err => {
+    if (err) throw err;
+    console.log('Connected to DB');
+  });
+} else {
+  console.log('Skipping DB connection in development-skip-db mode');
+}
 
 app.get("/api/users", (req, res) => {
   db.query("SELECT * FROM users", (err, results) => {
