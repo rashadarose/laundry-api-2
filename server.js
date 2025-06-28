@@ -55,6 +55,15 @@ app.post("/api/users", (req, res) => {
   });
 });
 
+app.get('/api/users/:id', (req, res) => {
+  const userId = req.params.id;
+  db.query('SELECT * FROM users WHERE id = ?', [userId], (err, results) => {
+    if (err) return res.status(500).json({ error: err });
+    if (results.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json(results[0]);
+  });
+});
+
 app.post("/api/signin", (req, res) => {
   const { identifier, password_hash } = req.body; // identifier can be name or email
   if (!identifier || !password_hash) {
@@ -153,12 +162,13 @@ app.post("/api/checkout", async (req, res) => {
     return res.status(400).json({ error: "Amount and paymentMethodId are required." });
   }
   try {
+    const API_URL = process.env.REACT_APP_API_URL;
     const paymentIntent = await stripe.paymentIntents.create({
       amount,
       currency,
       payment_method: paymentMethodId,
       confirm: true,
-      return_url: "http://localhost:3000/confirmation",
+      return_url: `${API_URL}/confirmation`,
       automatic_payment_methods: { enabled: true }
     });
 
