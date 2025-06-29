@@ -7,7 +7,8 @@ const nodemailer = require('nodemailer');
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
-
+const bcrypt = require('bcrypt');
+const saltRounds = 10;
 
 const app = express();
 app.use(cors());
@@ -38,11 +39,12 @@ app.get("/api/users", (req, res) => {
   });
 });
 
-app.post("/api/users", (req, res) => {
-  const { name, phone, email, password_hash } = req.body;
-  if (!name || !phone || !email || !password_hash) {
+app.post("/api/users", async (req, res) => {
+  const { name, phone, email, password } = req.body;
+  if (!name || !phone || !email || !password) {
     return res.status(400).json({ error: "All fields are required." });
   }
+  const password_hash = await bcrypt.hash(password, saltRounds);
   const sql = "INSERT INTO users (name, phone, email, password_hash) VALUES (?, ?, ?, ?)";
   db.query(sql, [name, phone, email, password_hash], (err, result) => {
     if (err) return res.status(500).json({ error: err });
@@ -65,22 +67,25 @@ app.get('/api/users/:id', (req, res) => {
 });
 
 app.post("/api/signin", (req, res) => {
-  const { identifier, password_hash } = req.body; // identifier can be name or email
-  if (!identifier || !password_hash) {
+  const { identifier, password } = req.body;
+  if (!identifier || !password) {
     return res.status(400).json({ error: "Name or email and password are required." });
   }
   const sql = `
     SELECT * FROM users 
-    WHERE (name = ? OR email = ?) AND password_hash = ?
+    WHERE (name = ? OR email = ?)
     LIMIT 1
   `;
-  db.query(sql, [identifier, identifier, password_hash], (err, results) => {
+  db.query(sql, [identifier, identifier], async (err, results) => {
     if (err) return res.status(500).json({ error: err });
     if (results.length === 0) {
       return res.status(401).json({ error: "Invalid credentials." });
     }
-
     const user = results[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
     const isFirstVisit = !user.has_visited;
 
     // Update has_visited to true if it's the first visit
@@ -213,6 +218,94 @@ transporter.sendMail(mailOptions, (error, info) => {
   } catch (err) {
     res.status(400).json({ success: false, error: err.message });
   }
+});
+
+app.get('/admin', (req, res) => {
+  const { admin_secret } = req.query;
+  if (admin_secret !== process.env.ADMIN_SECRET) {
+    return res.status(403).send('Forbidden');
+  }
+  // You can render a page, or just send data for now
+  db.query('SELECT * FROM pickup_orders', (err, results) => {
+    if (err) return res.status(500).json({ error: err });
+    res.json(results);
+  });
+});
+
+// Get order status
+app.get('/api/orders/:id/status', async (req, res) => {
+  const [rows] = await db.query('SELECT status FROM pickup_orders WHERE id = ?', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
+  res.json({ status: rows[0].status });
+});
+
+// Update order status
+app.put('/api/orders/:id/status', async (req, res) => {
+  const { status } = req.body;
+  const validStatuses = [
+    'received', 'washing', 'washed', 'folding', 'folded', 'ready_for_delivery', 'delivered'
+  ];
+  if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Invalid status' });
+
+  // Get user info for notification
+  db.query(
+    'SELECT u.phone, u.email FROM pickup_orders p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
+    [req.params.id],
+    async (err, results) => {
+      if (err) return res.status(500).json({ error: err });
+      if (results.length === 0) return res.status(404).json({ error: 'Order or user not found' });
+
+      const { phone, email } = results[0];
+
+      // Update status
+      db.query('UPDATE pickup_orders SET status = ? WHERE id = ?', [status, req.params.id], async (err2) => {
+        if (err2) return res.status(500).json({ error: err2 });
+
+        // --- Twilio SMS ---
+        if (phone) {
+          const client = require('twilio')(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+          try {
+            await client.messages.create({
+              body: `Your laundry order status is now: ${status}`,
+              from: process.env.TWILIO_PHONE_NUMBER,
+              to: phone
+            });
+            console.log('SMS notification sent to', phone);
+          } catch (smsErr) {
+            console.error('Error sending SMS:', smsErr);
+          }
+        }
+
+        // --- Nodemailer Email ---
+        if (email) {
+          const nodemailer = require('nodemailer');
+          const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+              user: process.env.EMAIL_USER,
+              pass: process.env.EMAIL_PASS,
+            },
+          });
+
+          const mailOptions = {
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: 'Laundry Order Status Update',
+            text: `Hello! Your laundry order status is now: ${status}`,
+          };
+
+          transporter.sendMail(mailOptions, (error, info) => {
+            if (error) {
+              return console.error('Error sending email:', error);
+            }
+            console.log('Email sent successfully:', info.response);
+          });
+        }
+
+        res.json({ success: true, message: 'Order status updated and notifications sent.' });
+      });
+    }
+  );
 });
 
 app.listen(3002, () => {
