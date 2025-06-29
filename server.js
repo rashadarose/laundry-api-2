@@ -221,10 +221,10 @@ transporter.sendMail(mailOptions, (error, info) => {
 });
 
 app.get('/admin', (req, res) => {
-  const { admin_secret } = req.query;
-  if (admin_secret !== process.env.ADMIN_SECRET) {
-    return res.status(403).send('Forbidden');
-  }
+  // const { admin_secret } = req.query;
+  // if (admin_secret !== process.env.ADMIN_SECRET) {
+  //   return res.status(403).send('Forbidden');
+  // }
   // You can render a page, or just send data for now
   db.query('SELECT * FROM pickup_orders', (err, results) => {
     if (err) return res.status(500).json({ error: err });
