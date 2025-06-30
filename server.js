@@ -220,7 +220,7 @@ transporter.sendMail(mailOptions, (error, info) => {
   }
 });
 
-app.get('/admin', (req, res) => {
+app.get('/api/admin', (req, res) => {
   // const { admin_secret } = req.query;
   // if (admin_secret !== process.env.ADMIN_SECRET) {
   //   return res.status(403).send('Forbidden');
