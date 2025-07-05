@@ -8,6 +8,7 @@ const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const twilio = require('twilio');
 const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 const saltRounds = 10;
 
 const app = express();
@@ -23,6 +24,20 @@ const db = mysql.createConnection({
   database: process.env.DB_NAME || "laundryapp",
   port: process.env.DB_PORT || 3306, // explicitly set the port
 });
+
+function requireAdminJWT(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'No token' });
+  const token = auth.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (!decoded.admin) throw new Error();
+    req.admin = decoded;
+    next();
+  } catch {
+    res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
 
 //  db.connect(err => {
 //     if (err) throw err;
@@ -232,6 +247,29 @@ app.get('/api/admin', (req, res) => {
   });
 });
 
+// Admin sign-in
+app.post("/api/admin/signin", (req, res) => {
+  const { username, password } = req.body;
+  if (
+    username === process.env.ADMIN_USERNAME &&
+    password === process.env.ADMIN_PASSWORD
+  ) {
+    // Create JWT token
+    const token = jwt.sign(
+      { admin: true, username },
+      process.env.JWT_SECRET,
+      { expiresIn: '2h' }
+    );
+  //    db.query('SELECT * FROM pickup_orders', (err, results) => {
+  //   if (err) return res.status(500).json({ error: err });
+  //   res.json(results);
+  // });
+
+    return res.json({ success: true, token });
+  }
+  res.status(401).json({ error: "Invalid admin credentials" });
+});
+
 // Get order status
 app.get('/api/orders/:id/status', async (req, res) => {
   const [rows] = await db.query('SELECT status FROM pickup_orders WHERE id = ?', [req.params.id]);
@@ -306,6 +344,13 @@ app.put('/api/orders/:id/status', async (req, res) => {
       });
     }
   );
+});
+
+app.get('/api/admin/orders', requireAdminJWT, (req, res) => {
+  db.query('SELECT * FROM pickup_orders', (err, results) => {
+    if (err) return res.status(500).json({ error: err });
+    res.json(results);
+  });
 });
 
 app.listen(3002, () => {
