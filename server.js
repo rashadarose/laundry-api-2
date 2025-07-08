@@ -154,22 +154,30 @@ app.put("/api/users/:id", (req, res) => {
 });
 
 app.post("/api/pickups", (req, res) => {
-  const { user_id, name, address, pickupDate, pickupTime, loadAmount, dropoffTime, price } = req.body;
-  if (!user_id || !name || !address || !pickupDate || !pickupTime || !loadAmount || !dropoffTime || !price) {
+  const { user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, price, notes } = req.body;
+  if (!user_id || !name || !address || !pickup_date || !pickup_time || !load_amount || !dropoff_time || !price) {
     return res.status(400).json({ error: "All fields are required." });
   }
+  const confirm_number = generateComNumber();
+
   const sql = `
-    INSERT INTO pickup_orders (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, price)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO pickup_orders 
+    (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, price, confirm_number, notes)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `;
+
   db.query(
     sql,
-    [user_id, name, address, pickupDate, pickupTime, loadAmount, dropoffTime, price],
+    [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, price, confirm_number, notes || null],
     (err, result) => {
-      if (err) return res.status(500).json({ error: err });
+      if (err){
+        console.error('SQL Error:', err);
+        return res.status(500).json({ error: err.message });
+      } 
       res.status(201).json({
         message: "Pickup order created successfully",
         pickupId: result.insertId,
+        confirm_number,
         success: true
       });
     }
@@ -352,6 +360,15 @@ app.get('/api/admin/orders', requireAdminJWT, (req, res) => {
     res.json(results);
   });
 });
+
+function generateComNumber() {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
 
 app.listen(3002, () => {
   console.log("Server running on http://localhost:3002");
