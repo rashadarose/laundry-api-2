@@ -356,6 +356,7 @@ app.put("/api/users/:id", (req, res) => {
   });
 });
 
+// Update your existing /api/pickups endpoint
 app.post("/api/pickups", (req, res) => {
   const { 
     user_id, 
@@ -367,7 +368,9 @@ app.post("/api/pickups", (req, res) => {
     dropoff_time, 
     pricing_tier = 'self_wash',
     weight_lbs = 10,
-    notes 
+    notes,
+    phone,
+    status = 'received' // Default to 'received' status
   } = req.body;
   
   if (!user_id || !name || !address || !pickup_date || !pickup_time || !load_amount || !dropoff_time) {
@@ -391,19 +394,51 @@ app.post("/api/pickups", (req, res) => {
       const sql = `
         INSERT INTO pickup_orders 
         (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, price, confirm_number, notes)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, phone, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
       `;
 
       db.query(
         sql,
         [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes || null],
-        (err, result) => {
+         pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes || null, phone || null, status],
+        async (err, result) => {
           if (err) {
             console.error('SQL Error:', err);
             return res.status(500).json({ error: err.message });
           }
+
+          // Send confirmation email to admin
+          try {
+            await sendEmail(
+              'riseaboveamg@gmail.com',
+              'FoldNGo - New Order Received',
+              `New pickup order created!
+              
+Order Details:
+- Order ID: ${result.insertId}
+- Customer: ${name}
+- Phone: ${phone || 'Not provided'}
+- Address: ${address}
+- Pickup Date: ${pickup_date} at ${pickup_time}
+- Service: ${pricing_tier}
+- Weight: ${weight_lbs} lbs
+- Total Price: $${total_price}
+- Confirmation Number: ${confirm_number}
+- Status: ${status.toUpperCase()}
+- Notes: ${notes || 'None'}
+              `
+            );
+            console.log('✅ New order notification email sent to admin');
+          } catch (emailErr) {
+            console.error('❌ Admin notification email failed:', emailErr);
+          }
+
+          // Log what SMS would have been sent to customer
+          if (phone) {
+            console.log(`📱 [SMS DISABLED] Would send to ${phone}: Order confirmed! Your confirmation number is ${confirm_number}. Status: ${status.toUpperCase()}`);
+          }
+
           res.status(201).json({
             message: "Pickup order created successfully",
             pickupId: result.insertId,
@@ -411,6 +446,7 @@ app.post("/api/pickups", (req, res) => {
             total_price: parseFloat(total_price),
             pricing_tier,
             unit_price,
+            status,
             success: true
           });
         }
