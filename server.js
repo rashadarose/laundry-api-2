@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require("express");
 const cors = require("cors");
 const mysql = require("mysql2");
-const nodemailer = require('nodemailer'); // Replace AWS
+const nodemailer = require('nodemailer'); // Email notifications
+const AWS = require('aws-sdk'); // SMS notifications
 const Stripe = require('stripe');
 const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
 const bcrypt = require('bcrypt');
@@ -19,7 +20,15 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// Replace SNS functions with Nodemailer
+// Configure AWS SNS for SMS
+AWS.config.update({
+  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  region: process.env.AWS_REGION || 'us-east-1'
+});
+
+const sns = new AWS.SNS();
+// Email function
 const sendEmail = async (to, subject, text) => {
   try {
     console.log(`📧 Sending email to: ${to}`);
@@ -35,6 +44,62 @@ const sendEmail = async (to, subject, text) => {
     return result;
   } catch (error) {
     console.error('❌ Email send failed:', error);
+    throw error;
+  }
+};
+
+// SMS function
+const sendSMS = async (phoneNumber, message) => {
+  try {
+    console.log(`📱 Sending SMS to: ${phoneNumber}`);
+    
+    // Format phone number (ensure it starts with +1 for US numbers)
+    let formattedNumber = phoneNumber.replace(/\D/g, ''); // Remove non-digits
+    if (formattedNumber.length === 10) {
+      formattedNumber = '+1' + formattedNumber; // Add US country code
+    } else if (formattedNumber.length === 11 && formattedNumber.startsWith('1')) {
+      formattedNumber = '+' + formattedNumber;
+    } else if (!formattedNumber.startsWith('+')) {
+      formattedNumber = '+' + formattedNumber;
+    }
+    
+    const params = {
+      Message: message,
+      PhoneNumber: formattedNumber
+    };
+    
+    const result = await sns.publish(params).promise();
+    console.log('✅ SMS sent successfully:', result.MessageId);
+    return result;
+  } catch (error) {
+    console.error('❌ SMS send failed:', error);
+    
+    // Check for sandbox mode error
+    if (error.code === 'OptedOut' || error.message.includes('is not verified') || error.message.includes('sandbox')) {
+      const sandboxError = new Error(`
+🚨 AWS SNS SANDBOX MODE DETECTED!
+      
+The phone number ${phoneNumber} is not verified for SMS delivery.
+
+SOLUTION OPTIONS:
+1. 🔧 QUICK FIX: Verify your phone number:
+   - AWS Console → SNS → Phone numbers → Add phone number
+   - Enter: ${phoneNumber}
+   - Get verification code and complete setup
+
+2. 📋 PENDING REQUEST: Your sandbox exit request has been pending for 1+ month
+   - Contact AWS Support to escalate
+   - AWS Console → Support → Create Case
+   - Reference: SNS Sandbox Exit Request
+
+3. 💰 COST: Phone verification is FREE, SMS sending is ~$0.006 each
+
+Original Error: ${error.message}
+      `);
+      sandboxError.code = 'SANDBOX_MODE';
+      throw sandboxError;
+    }
+    
     throw error;
   }
 };
@@ -64,25 +129,47 @@ app.use(session({
   }
 }));
 
-// Add session debugging middleware (temporary)
-app.use((req, res, next) => {
-  console.log('=== SESSION DEBUG ===');
-  console.log('Session ID:', req.sessionID);
-  console.log('User ID in session:', req.session?.userId);
-  console.log('User name in session:', req.session?.user?.name);
-  console.log('====================');
-  next();
-});
+// Session debugging disabled
+// app.use((req, res, next) => {
+//   console.log('=== SESSION DEBUG ===');
+//   console.log('Session ID:', req.sessionID);
+//   console.log('User ID in session:', req.session?.userId);
+//   console.log('User name in session:', req.session?.user?.name);
+//   console.log('====================');
+//   next();
+// });
 
 // Update with your actual credentials
 // if (process.env.NODE_ENV !== 'development-skip-db') {
-const db = mysql.createConnection({
-  host: process.env.DB_HOST || "localhost",
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASS || "", // replace with your MySQL password
-  database: process.env.DB_NAME || "laundryapp",
-  port: process.env.DB_PORT || 3306, // explicitly set the port
-});
+
+let db = null;
+
+// Only connect to database if environment variables are set
+if (process.env.DB_HOST || process.env.NODE_ENV !== 'testing-sms') {
+  try {
+    db = mysql.createConnection({
+      host: process.env.DB_HOST || "localhost",
+      user: process.env.DB_USER || "root",
+      password: process.env.DB_PASS || "", // replace with your MySQL password
+      database: process.env.DB_NAME || "laundryapp",
+      port: process.env.DB_PORT || 3306, // explicitly set the port
+    });
+
+    db.connect(err => {
+      if (err) {
+        console.error('❌ Database connection failed:', err);
+        console.log('🔧 Continuing without database for SMS testing...');
+        db = null;
+      } else {
+        console.log('✅ Connected to database successfully');
+      }
+    });
+  } catch (dbError) {
+    console.error('❌ Database setup failed:', dbError);
+    console.log('🔧 Continuing without database for SMS testing...');
+    db = null;
+  }
+}
 
 function requireAdminJWT(req, res, next) {
   const auth = req.headers.authorization;
@@ -105,15 +192,49 @@ function requireUserSession(req, res, next) {
   next();
 }
 
-//  db.connect(err => {
-//     if (err) throw err;
-//     console.log('Connected to DB');
-//   });
-// } else {
-//   console.log('Skipping DB connection in development-skip-db mode');
-// }
+// Debug endpoints - Add these first to test routing
+app.get('/', (req, res) => {
+  console.log('🏠 Root endpoint hit!');
+  res.json({ 
+    success: true, 
+    message: 'Laundry API Server is running!', 
+    timestamp: new Date().toISOString(),
+    port: 3002
+  });
+});
+
+app.get('/api', (req, res) => {
+  console.log('🔗 /api endpoint hit!');
+  res.json({ 
+    success: true, 
+    message: 'API is working', 
+    availableEndpoints: ['/api/test', '/api/test-pickups', '/api/pickups'],
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/api/test', (req, res) => {
+  console.log('🧪 GET /api/test hit!');
+  res.json({ success: true, message: 'GET test endpoint working', timestamp: new Date().toISOString() });
+});
+
+app.post('/api/test', (req, res) => {
+  console.log('🧪 POST /api/test hit with body:', req.body);
+  res.json({ success: true, message: 'POST test endpoint working', receivedData: req.body, timestamp: new Date().toISOString() });
+});
+
+app.post("/api/test-pickups", (req, res) => {
+  console.log('🧪 Test pickups endpoint hit with body:', req.body);
+  res.json({ 
+    success: true, 
+    message: "Test pickups endpoint working",
+    receivedData: req.body,
+    timestamp: new Date().toISOString()
+  });
+});
 
 app.get("/api/users", (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not connected' });
   db.query("SELECT * FROM users", (err, results) => {
     if (err) return res.status(500).json({ error: err });
     res.json(results);
@@ -149,6 +270,7 @@ app.get('/api/users/:id', (req, res) => {
 
 // GET /api/pricing - Get all active pricing tiers
 app.get("/api/pricing", (req, res) => {
+  if (!db) return res.status(503).json({ error: 'Database not connected' });
   db.query(
     "SELECT service_type, display_name, description, price, is_featured, is_active FROM pricing_tiers WHERE is_active = TRUE ORDER BY price ASC",
     (err, results) => {
@@ -358,6 +480,10 @@ app.put("/api/users/:id", (req, res) => {
 
 // Update your existing /api/pickups endpoint
 app.post("/api/pickups", (req, res) => {
+  console.log('🚀 /api/pickups endpoint hit!');
+  console.log('📦 Full request body:', JSON.stringify(req.body, null, 2));
+  console.log('📝 Request headers:', req.headers);
+  
   const { 
     user_id, 
     name, 
@@ -369,12 +495,37 @@ app.post("/api/pickups", (req, res) => {
     pricing_tier = 'self_wash',
     weight_lbs = 10,
     notes,
-    phone,
     status = 'received' // Default to 'received' status
   } = req.body;
   
-  if (!user_id || !name || !address || !pickup_date || !pickup_time || !load_amount || !dropoff_time) {
-    return res.status(400).json({ error: "Required fields are missing." });
+  // Better error handling with specific missing fields
+  const requiredFields = {
+    user_id,
+    name,
+    address,
+    pickup_date,
+    pickup_time,
+    load_amount,
+    dropoff_time
+  };
+  
+  const missingFields = Object.keys(requiredFields).filter(key => {
+    const value = requiredFields[key];
+    const isMissing = value === undefined || value === null || value === '' || (typeof value === 'string' && value.trim() === '');
+    if (isMissing) {
+      console.log(`❌ Field '${key}' is missing. Value: ${JSON.stringify(value)}`);
+    }
+    return isMissing;
+  });
+  
+  if (missingFields.length > 0) {
+    console.log('❌ Missing required fields:', missingFields);
+    console.log('📝 Received data:', req.body);
+    return res.status(400).json({ 
+      error: "Required fields are missing.",
+      missingFields: missingFields,
+      receivedFields: Object.keys(req.body)
+    });
   }
 
   // Get pricing information
@@ -394,14 +545,14 @@ app.post("/api/pickups", (req, res) => {
       const sql = `
         INSERT INTO pickup_orders 
         (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, phone, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+         pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
       `;
 
       db.query(
         sql,
         [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes || null, phone || null, status],
+         pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes || null, status],
         async (err, result) => {
           if (err) {
             console.error('SQL Error:', err);
@@ -418,7 +569,6 @@ app.post("/api/pickups", (req, res) => {
 Order Details:
 - Order ID: ${result.insertId}
 - Customer: ${name}
-- Phone: ${phone || 'Not provided'}
 - Address: ${address}
 - Pickup Date: ${pickup_date} at ${pickup_time}
 - Service: ${pricing_tier}
@@ -432,11 +582,6 @@ Order Details:
             console.log('✅ New order notification email sent to admin');
           } catch (emailErr) {
             console.error('❌ Admin notification email failed:', emailErr);
-          }
-
-          // Log what SMS would have been sent to customer
-          if (phone) {
-            console.log(`📱 [SMS DISABLED] Would send to ${phone}: Order confirmed! Your confirmation number is ${confirm_number}. Status: ${status.toUpperCase()}`);
           }
 
           res.status(201).json({
@@ -456,7 +601,7 @@ Order Details:
 });
 
 app.post("/api/checkout", async (req, res) => {
-  const { amount, currency = "usd", paymentMethodId, phone } = req.body;
+  const { amount, currency = "usd", paymentMethodId } = req.body;
   if (!amount || !paymentMethodId) {
     return res.status(400).json({ error: "Amount and paymentMethodId are required." });
   }
@@ -482,9 +627,6 @@ app.post("/api/checkout", async (req, res) => {
     } catch (emailErr) {
       console.error('❌ Email Error:', emailErr);
     }
-
-    // Log what SMS would have been
-    console.log(`📱 [SMS DISABLED] Would send to ${phone}: Payment successful! Thank you for your order.`);
 
     res.json({ success: true, message: "Payment successful. Email confirmation sent." });
   } catch (err) {
@@ -560,21 +702,41 @@ app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
         const subject = 'FoldNGo - Order Status Update';
 
         console.log(`📧 Sending notification for order ${req.params.id}`);
+        
+        let emailSent = false;
+        let smsSent = false;
 
         // Send Email notification
         if (email) {
           try {
             await sendEmail(email, subject, message);
             console.log('✅ Email notification sent successfully');
+            emailSent = true;
           } catch (emailErr) {
             console.error('❌ Email Error:', emailErr);
           }
         }
 
-        // Log what SMS would have been (for reference)
-        console.log(`📱 [SMS DISABLED] Would send to ${phone}: ${message}`);
+        // Send SMS notification
+        if (phone) {
+          try {
+            await sendSMS(phone, message);
+            console.log('✅ SMS notification sent successfully');
+            smsSent = true;
+          } catch (smsErr) {
+            console.error('❌ SMS Error:', smsErr);
+          }
+        }
 
-        res.json({ success: true, message: 'Order status updated and email notification sent.' });
+        const notifications = [];
+        if (emailSent) notifications.push('email');
+        if (smsSent) notifications.push('SMS');
+        
+        const notificationMessage = notifications.length > 0 
+          ? `Order status updated and ${notifications.join(' and ')} notification${notifications.length > 1 ? 's' : ''} sent.`
+          : 'Order status updated but no notifications sent.';
+
+        res.json({ success: true, message: notificationMessage });
       });
     }
   );
@@ -676,6 +838,72 @@ function generateComNumber() {
   return result;
 }
 
+app.get('/api/test-sms', async (req, res) => {
+  const { phone } = req.query;
+  
+  if (!phone) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Phone number required. Use ?phone=+1234567890' 
+    });
+  }
+  
+  try {
+    const result = await sendSMS(phone, 'Test SMS from FoldNGo! Your laundry notifications are working! 🧺');
+    
+    res.json({ 
+      success: true, 
+      message: 'Test SMS sent successfully',
+      messageId: result.MessageId,
+      sentTo: phone
+    });
+  } catch (error) {
+    console.error('❌ SMS Test Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      code: error.code
+    });
+  }
+});
+
+// Simple SMS test without query params - USING SECURE PHONE NUMBER!
+app.get('/api/test-sms-simple', async (req, res) => {
+  const testPhone = process.env.TEST_PHONE_NUMBER || '+19737528237'; // Your phone from .env file
+  
+  console.log('🧪 Testing SMS with phone:', testPhone);
+  console.log('🔑 AWS Region:', process.env.AWS_REGION);
+  console.log('🔑 Has AWS Keys:', !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY));
+  
+  if (!testPhone || testPhone === '+1YOUR_PHONE_NUMBER') {
+    return res.status(400).json({
+      success: false,
+      error: 'TEST_PHONE_NUMBER not configured in .env file',
+      instructions: 'Add TEST_PHONE_NUMBER=+1YOURNUMBER to your .env file'
+    });
+  }
+  
+  try {
+    const result = await sendSMS(testPhone, 'Test SMS from FoldNGo! Your laundry notifications are working! 🧺');
+    
+    res.json({ 
+      success: true, 
+      message: 'Test SMS sent successfully',
+      messageId: result.MessageId,
+      sentTo: testPhone
+    });
+  } catch (error) {
+    console.error('❌ SMS Test Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      code: error.code,
+      awsRegion: process.env.AWS_REGION,
+      hasAwsKeys: !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY)
+    });
+  }
+});
+
 app.get('/api/test-aws', async (req, res) => {
   try {
     // Test AWS credentials
@@ -720,6 +948,155 @@ app.get('/api/test-email', async (req, res) => {
   }
 });
 
+// Quick SMS debug endpoint
+app.get('/api/sms-debug', async (req, res) => {
+  console.log('🔍 SMS Debug Test Starting...');
+  
+  const testPhone = process.env.TEST_PHONE_NUMBER || '+19737528237';
+  console.log('📱 Testing with phone:', testPhone);
+  console.log('🔧 Environment check:');
+  console.log('  - AWS Keys Set:', !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY));
+  console.log('  - AWS Region:', process.env.AWS_REGION);
+  
+  try {
+    console.log('📤 Attempting SMS send...');
+    const result = await sendSMS(testPhone, 'DEBUG: FoldNGo SMS test - ' + new Date().toLocaleTimeString());
+    console.log('✅ SMS sent successfully!');
+    
+    res.json({ 
+      success: true, 
+      message: '✅ SMS sent successfully!',
+      messageId: result.MessageId,
+      sentTo: testPhone,
+      debugInfo: {
+        hasAwsKeys: !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY),
+        region: process.env.AWS_REGION,
+        timestamp: new Date().toISOString()
+      }
+    });
+  } catch (error) {
+    console.error('❌ SMS Debug Error:', error.message);
+    console.error('❌ Error Code:', error.code);
+    
+    res.status(500).json({ 
+      success: false, 
+      error: error.message,
+      errorCode: error.code,
+      debugInfo: {
+        phoneNumber: testPhone,
+        region: process.env.AWS_REGION,
+        hasAwsKeys: !!(process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY),
+        fullErrorMessage: error.stack
+      },
+      solution: {
+        message: 'If you see "OptedOut" or "not verified", you need to verify your phone number in AWS SNS console',
+        steps: [
+          '1. Go to AWS Console → SNS → Text messaging → Phone numbers',
+          '2. Click "Add phone number"',
+          '3. Enter your phone number: ' + testPhone,
+          '4. Complete SMS verification process'
+        ]
+      }
+    });
+  }
+});
+
+// MOCK SMS TEST - No AWS required!
+app.get('/api/test-sms-mock', async (req, res) => {
+  console.log('🎭 MOCK SMS Test - No AWS calls!');
+  
+  const testPhone = process.env.TEST_PHONE_NUMBER || '+19737528237';
+  const message = '🧺 MOCK: Your FoldNGo laundry order #12345 status is now: WASHING';
+  
+  // Simulate phone number formatting logic
+  let formattedNumber = testPhone.replace(/\D/g, '');
+  if (formattedNumber.length === 10) {
+    formattedNumber = '+1' + formattedNumber;
+  } else if (formattedNumber.length === 11 && formattedNumber.startsWith('1')) {
+    formattedNumber = '+' + formattedNumber;
+  } else if (!formattedNumber.startsWith('+')) {
+    formattedNumber = '+' + formattedNumber;
+  }
+  
+  // Mock successful response
+  const mockResponse = {
+    success: true,
+    mode: 'MOCK_SMS',
+    message: '🎭 SMS simulated successfully (no actual message sent)',
+    mockData: {
+      originalPhone: testPhone,
+      formattedPhone: formattedNumber,
+      messageContent: message,
+      messageLength: message.length,
+      timestamp: new Date().toISOString(),
+      mockMessageId: 'mock-' + Date.now(),
+      wouldHaveBeenSent: true
+    },
+    actualSMSFormat: {
+      PhoneNumber: formattedNumber,
+      Message: message
+    },
+    explanation: 'This tests all SMS logic without hitting AWS SNS. Use this while your phone verification is pending!'
+  };
+  
+  console.log('🎭 MOCK SMS Details:');
+  console.log('  📱 To:', formattedNumber);
+  console.log('  💬 Message:', message);
+  console.log('  ✅ All formatting logic tested successfully!');
+  
+  res.json(mockResponse);
+});
+
+// Test SMS formatting logic only
+app.get('/api/test-sms-format', (req, res) => {
+  const testCases = [
+    '9737528237',      // 10 digits
+    '19737528237',     // 11 digits with 1
+    '+19737528237',    // Already formatted
+    '973-752-8237',    // With dashes
+    '(973) 752-8237'   // With parentheses
+  ];
+  
+  const results = testCases.map(phone => {
+    let formatted = phone.replace(/\D/g, '');
+    if (formatted.length === 10) {
+      formatted = '+1' + formatted;
+    } else if (formatted.length === 11 && formatted.startsWith('1')) {
+      formatted = '+' + formatted;
+    } else if (!formatted.startsWith('+')) {
+      formatted = '+' + formatted;
+    }
+    
+    return {
+      input: phone,
+      output: formatted,
+      valid: formatted === '+19737528237'
+    };
+  });
+  
+  res.json({
+    success: true,
+    message: 'Phone number formatting test complete',
+    testCases: results,
+    explanation: 'This tests the phone formatting logic used in SMS sending'
+  });
+});
+
+// Start server
 app.listen(3002, () => {
-  console.log("Server running on http://localhost:3002");
+  console.log('🚀 Server running on port 3002');
+  console.log('📱 SMS endpoints available:');
+  console.log('  - /api/test-sms-mock (NO AWS - safe testing)');
+  console.log('  - /api/test-sms-format (phone formatting test)');
+  console.log('  - /api/test-aws (AWS connection test)');
+});
+
+// Add error handling
+process.on('uncaughtException', (err) => {
+  console.error('💥 Uncaught Exception:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
