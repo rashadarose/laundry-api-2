@@ -497,7 +497,7 @@ app.post("/api/pickups", (req, res) => {
     notes,
     status = 'received' // Default to 'received' status
   } = req.body;
-  
+  status = req.body.status || 'received'
   // Better error handling with specific missing fields
   const requiredFields = {
     user_id,
