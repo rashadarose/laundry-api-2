@@ -409,48 +409,39 @@ app.get("/api/pricing/:serviceType", (req, res) => {
 
 app.post("/api/signin", (req, res) => {
   console.log('🔐 Sign-in attempt started');
-  console.log('🔐 Request body keys:', Object.keys(req.body || {}));
-  console.log('🔐 Session exists:', !!req.session);
-  console.log('🔐 Database exists:', !!db);
   
-  try {
-    // Check database connection first
-    if (!db) {
-      console.error('❌ Database not connected for sign-in');
-      return res.status(503).json({ 
-        error: 'Database service unavailable. Please try again later.',
+  // Check database connection first
+  if (!db) {
+    console.error('❌ Database not connected for sign-in');
+    return res.status(503).json({ 
+      error: 'Database service unavailable. Please try again later.',
+      success: false 
+    });
+  }
+  
+  const { identifier, password } = req.body;
+  if (!identifier || !password) {
+    console.log('❌ Missing credentials in sign-in request');
+    return res.status(400).json({ error: "Name or email and password are required." });
+  }
+  
+  console.log('🔐 About to query database...');
+  const sql = `
+    SELECT id, name, email, phone, password_hash, has_visited 
+    FROM users 
+    WHERE (name = ? OR email = ?)
+    LIMIT 1
+  `;
+  
+  db.query(sql, [identifier, identifier], (err, results) => {
+    if (err) {
+      console.error('❌ Database error during sign-in:', err);
+      return res.status(500).json({ 
+        error: 'Database connection failed. Please try again.',
         success: false 
       });
     }
     
-    const { identifier, password } = req.body;
-    if (!identifier || !password) {
-      console.log('❌ Missing credentials in sign-in request');
-      return res.status(400).json({ error: "Name or email and password are required." });
-    }
-    
-    console.log('🔐 About to query database...');
-    const sql = `
-      SELECT id, name, email, phone, password_hash, has_visited 
-      FROM users 
-      WHERE (name = ? OR email = ?)
-      LIMIT 1
-    `;
-    
-    db.query(sql, [identifier, identifier], async (err, results) => {
-      try {
-        if (err) {
-          console.error('❌ Database error during sign-in:', err);
-          return res.status(500).json({ 
-            error: 'Database connection failed. Please try again.',
-            success: false 
-          });
-        }
-        
-        if (results.length === 0) {
-          console.log('❌ User not found:', identifier);
-          return res.status(401).json({ error: "Invalid credentials." });
-        }
     if (results.length === 0) {
       console.log('❌ User not found:', identifier);
       return res.status(401).json({ error: "Invalid credentials." });
@@ -459,7 +450,7 @@ app.post("/api/signin", (req, res) => {
     const user = results[0];
     console.log('✅ User found, checking password...');
     
-    // CRITICAL: Check if password_hash exists before bcrypt
+    // Check if password_hash exists before bcrypt
     if (!user.password_hash) {
       console.error('❌ Missing password_hash for user:', user.name || user.email);
       return res.status(500).json({ 
@@ -468,27 +459,24 @@ app.post("/api/signin", (req, res) => {
       });
     }
     
-    // Safely compare password with try-catch
-    let match;
-    try {
-      match = await bcrypt.compare(password, user.password_hash);
-    } catch (bcryptError) {
-      console.error('❌ Bcrypt error for user:', user.name, 'Error:', bcryptError);
-      return res.status(500).json({ 
-        error: 'Authentication system error. Please try again.',
-        success: false 
-      });
-    }
-    
-    if (!match) {
-      console.log('❌ Password mismatch for user:', user.name);
-      return res.status(401).json({ error: "Invalid credentials." });
-    }
-    
-    console.log('✅ Password verified for user:', user.name);
-    
-    // Create session
-    try {
+    // Compare password with bcrypt
+    bcrypt.compare(password, user.password_hash, (bcryptErr, match) => {
+      if (bcryptErr) {
+        console.error('❌ Bcrypt error for user:', user.name, 'Error:', bcryptErr);
+        return res.status(500).json({ 
+          error: 'Authentication system error. Please try again.',
+          success: false 
+        });
+      }
+      
+      if (!match) {
+        console.log('❌ Password mismatch for user:', user.name);
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      
+      console.log('✅ Password verified for user:', user.name);
+      
+      // Create session
       req.session.userId = user.id;
       req.session.user = {
         id: user.id,
@@ -528,29 +516,8 @@ app.post("/api/signin", (req, res) => {
         },
         success: true
       });
-      
-    } catch (sessionError) {
-      console.error('❌ Session creation error:', sessionError);
-      return res.status(500).json({ 
-        error: 'Session creation failed. Please try again.',
-        success: false 
-      });
-    }
-    } catch (callbackError) {
-      console.error('❌ Database callback error:', callbackError);
-      return res.status(500).json({ 
-        error: 'Authentication process failed. Please try again.',
-        success: false 
-      });
-    }
     });
-  } catch (outerError) {
-    console.error('❌ Sign-in process error:', outerError);
-    return res.status(500).json({ 
-      error: 'Sign-in failed. Please try again.',
-      success: false 
-    });
-  }
+  });
 });
 
 // Check session status
@@ -894,7 +861,7 @@ app.get('/api/orders/:id/status', (req, res) => {
 });
 
 // Update order status
-app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
+app.put('/api/orders/:id/status', requireAdminJWT, (req, res) => {
   const { status } = req.body;
   const validStatuses = [
     'new', 'wash', 'done', 'sent'
@@ -905,15 +872,15 @@ app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
   db.query(
     'SELECT u.phone, u.email, u.name FROM pickup_orders p JOIN users u ON p.user_id = u.id WHERE p.id = ?',
     [req.params.id],
-    async (err, results) => {
-      if (err) return res.status(500).json({ error: err });
+    (err, results) => {
+      if (err) return res.status(500).json({ error: err.message });
       if (results.length === 0) return res.status(404).json({ error: 'Order or user not found' });
 
       const { phone, email, name } = results[0];
 
       // Update status
-      db.query('UPDATE pickup_orders SET status = ? WHERE id = ?', [status, req.params.id], async (err2) => {
-        if (err2) return res.status(500).json({ error: err2 });
+      db.query('UPDATE pickup_orders SET status = ? WHERE id = ?', [status, req.params.id], (err2) => {
+        if (err2) return res.status(500).json({ error: err2.message });
 
         // Map short codes to user-friendly messages
         const statusMessages = {
@@ -931,38 +898,56 @@ app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
         
         let emailSent = false;
         let smsSent = false;
+        let notificationsProcessed = 0;
+        const totalNotifications = (email ? 1 : 0) + (phone ? 1 : 0);
+        
+        function checkCompletion() {
+          notificationsProcessed++;
+          if (notificationsProcessed === totalNotifications) {
+            const notifications = [];
+            if (emailSent) notifications.push('email');
+            if (smsSent) notifications.push('SMS');
+            
+            const notificationMessage = notifications.length > 0 
+              ? `Order status updated and ${notifications.join(' and ')} notification${notifications.length > 1 ? 's' : ''} sent.`
+              : 'Order status updated but no notifications sent.';
+
+            res.json({ success: true, message: notificationMessage });
+          }
+        }
 
         // Send Email notification
         if (email) {
-          try {
-            await sendEmail(email, subject, message);
-            console.log('✅ Email notification sent successfully');
-            emailSent = true;
-          } catch (emailErr) {
-            console.error('❌ Email Error:', emailErr);
-          }
+          sendEmail(email, subject, message)
+            .then(() => {
+              console.log('✅ Email notification sent successfully');
+              emailSent = true;
+              checkCompletion();
+            })
+            .catch((emailErr) => {
+              console.error('❌ Email Error:', emailErr);
+              checkCompletion();
+            });
         }
 
         // Send SMS notification
         if (phone) {
-          try {
-            await sendSMS(phone, message);
-            console.log('✅ SMS notification sent successfully');
-            smsSent = true;
-          } catch (smsErr) {
-            console.error('❌ SMS Error:', smsErr);
-          }
+          sendSMS(phone, message)
+            .then(() => {
+              console.log('✅ SMS notification sent successfully');
+              smsSent = true;
+              checkCompletion();
+            })
+            .catch((smsErr) => {
+              console.error('❌ SMS Error:', smsErr);
+              checkCompletion();
+            });
         }
-
-        const notifications = [];
-        if (emailSent) notifications.push('email');
-        if (smsSent) notifications.push('SMS');
         
-        const notificationMessage = notifications.length > 0 
-          ? `Order status updated and ${notifications.join(' and ')} notification${notifications.length > 1 ? 's' : ''} sent.`
-          : 'Order status updated but no notifications sent.';
-
-        res.json({ success: true, message: notificationMessage });
+        // If no notifications to send, return immediately
+        if (totalNotifications === 0) {
+          res.json({ success: true, message: 'Order status updated but no notifications sent.' });
+        }
       });
     }
   );
