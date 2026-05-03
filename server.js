@@ -218,6 +218,49 @@ app.get('/api/test', (req, res) => {
   res.json({ success: true, message: 'GET test endpoint working', timestamp: new Date().toISOString() });
 });
 
+// Database status and health check endpoint
+app.get('/api/health', (req, res) => {
+  console.log('🔍 Health check endpoint hit!');
+  
+  const healthStatus = {
+    server: 'running',
+    timestamp: new Date().toISOString(),
+    database: db ? 'connected' : 'disconnected',
+    environment: process.env.NODE_ENV || 'development'
+  };
+  
+  if (db) {
+    // Test database connection with a simple query
+    db.query('SELECT 1 as test', (err, results) => {
+      if (err) {
+        console.error('❌ Database connection test failed:', err);
+        healthStatus.database = 'error';
+        healthStatus.dbError = err.message;
+        return res.status(503).json({ 
+          success: false, 
+          ...healthStatus,
+          message: 'Database connection failed'
+        });
+      } else {
+        console.log('✅ Database connection test passed');
+        healthStatus.database = 'healthy';
+        healthStatus.dbTest = results[0].test === 1 ? 'passed' : 'failed';
+        res.json({ 
+          success: true, 
+          ...healthStatus,
+          message: 'All systems healthy'
+        });
+      }
+    });
+  } else {
+    res.status(503).json({ 
+      success: false, 
+      ...healthStatus,
+      message: 'Database not initialized'
+    });
+  }
+});
+
 app.post('/api/test', (req, res) => {
   console.log('🧪 POST /api/test hit with body:', req.body);
   res.json({ success: true, message: 'POST test endpoint working', receivedData: req.body, timestamp: new Date().toISOString() });
@@ -296,60 +339,110 @@ app.get("/api/pricing/:serviceType", (req, res) => {
 });
 
 app.post("/api/signin", (req, res) => {
+  console.log('🔐 Sign-in attempt:', { identifier: req.body.identifier ? '***provided***' : 'missing' });
+  
+  // Check database connection first
+  if (!db) {
+    console.error('❌ Database not connected for sign-in');
+    return res.status(503).json({ 
+      error: 'Database service unavailable. Please try again later.',
+      success: false 
+    });
+  }
+  
   const { identifier, password } = req.body;
   if (!identifier || !password) {
+    console.log('❌ Missing credentials in sign-in request');
     return res.status(400).json({ error: "Name or email and password are required." });
   }
+  
   const sql = `
     SELECT * FROM users 
     WHERE (name = ? OR email = ?)
     LIMIT 1
   `;
+  
   db.query(sql, [identifier, identifier], async (err, results) => {
-    if (err) return res.status(500).json({ error: err });
-    if (results.length === 0) {
-      return res.status(401).json({ error: "Invalid credentials." });
+    if (err) {
+      console.error('❌ Database error during sign-in:', err);
+      return res.status(500).json({ 
+        error: 'Database error occurred. Please try again.',
+        success: false 
+      });
     }
-    const user = results[0];
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) {
+    if (results.length === 0) {
+      console.log('❌ User not found:', identifier);
       return res.status(401).json({ error: "Invalid credentials." });
     }
     
-    // Create session
-    req.session.userId = user.id;
-    req.session.user = {
-      id: user.id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone
-    };
-
-    console.log('🔥 SESSION CREATED:');
-    console.log('Session ID:', req.sessionID);
-    console.log('User stored:', req.session.user);
-
-    const isFirstVisit = !user.has_visited;
-
-    // Update has_visited to true if it's the first visit
-    if (isFirstVisit) {
-      db.query(
-        "UPDATE users SET has_visited = TRUE WHERE id = ?",
-        [user.id]
-      );
+    const user = results[0];
+    console.log('✅ User found, checking password...');
+    
+    try {
+      const match = await bcrypt.compare(password, user.password_hash);
+      if (!match) {
+        console.log('❌ Password mismatch for user:', user.name);
+        return res.status(401).json({ error: "Invalid credentials." });
+      }
+      
+      console.log('✅ Password verified for user:', user.name);
+    } catch (bcryptError) {
+      console.error('❌ Bcrypt error:', bcryptError);
+      return res.status(500).json({ 
+        error: 'Authentication error. Please try again.',
+        success: false 
+      });
     }
-
-    res.json({
-      message: "Sign in successful",
-      user: {
+    
+    // Create session
+    try {
+      req.session.userId = user.id;
+      req.session.user = {
         id: user.id,
         name: user.name,
         email: user.email,
-        phone: user.phone,
-        isFirstVisit
-      },
-      success: true
-    });
+        phone: user.phone
+      };
+
+      console.log('🔥 SESSION CREATED:');
+      console.log('Session ID:', req.sessionID);
+      console.log('User stored:', req.session.user);
+
+      const isFirstVisit = !user.has_visited;
+
+      // Update has_visited to true if it's the first visit
+      if (isFirstVisit) {
+        db.query(
+          "UPDATE users SET has_visited = TRUE WHERE id = ?",
+          [user.id],
+          (updateErr) => {
+            if (updateErr) {
+              console.error('❌ Error updating has_visited:', updateErr);
+              // Don't fail the sign-in for this
+            }
+          }
+        );
+      }
+
+      res.json({
+        message: "Sign in successful",
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          isFirstVisit
+        },
+        success: true
+      });
+      
+    } catch (sessionError) {
+      console.error('❌ Session creation error:', sessionError);
+      return res.status(500).json({ 
+        error: 'Session creation failed. Please try again.',
+        success: false 
+      });
+    }
   });
 });
 
@@ -495,9 +588,9 @@ app.post("/api/pickups", (req, res) => {
     pricing_tier = 'self_wash',
     weight_lbs = 10,
     notes,
-    status = 'received' // Default to 'received' status
+    status = 'new' // Default to 'new' status
   } = req.body;
-  status = req.body.status || 'received'
+  status = req.body.status || 'new'
   // Better error handling with specific missing fields
   const requiredFields = {
     user_id,
@@ -680,7 +773,7 @@ app.get('/api/orders/:id/status', async (req, res) => {
 app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
   const { status } = req.body;
   const validStatuses = [
-    'received', 'washing', 'completed', 'delivered'
+    'new', 'wash', 'done', 'sent'
   ];
   if (!validStatuses.includes(status)) return res.status(400).json({ error: 'Invalid status' });
 
@@ -698,7 +791,16 @@ app.put('/api/orders/:id/status', requireAdminJWT, async (req, res) => {
       db.query('UPDATE pickup_orders SET status = ? WHERE id = ?', [status, req.params.id], async (err2) => {
         if (err2) return res.status(500).json({ error: err2 });
 
-        const message = `Hi ${name}! Your laundry order #${req.params.id} status is now: ${status.toUpperCase()}`;
+        // Map short codes to user-friendly messages
+        const statusMessages = {
+          'new': 'RECEIVED',
+          'wash': 'WASHING', 
+          'done': 'COMPLETED',
+          'sent': 'DELIVERED'
+        };
+        const friendlyStatus = statusMessages[status] || status.toUpperCase();
+        
+        const message = `Hi ${name}! Your laundry order #${req.params.id} status is now: ${friendlyStatus}`;
         const subject = 'FoldNGo - Order Status Update';
 
         console.log(`📧 Sending notification for order ${req.params.id}`);
