@@ -426,12 +426,7 @@ app.post("/api/signin", (req, res) => {
   }
   
   console.log('🔐 About to query database...');
-  const sql = `
-    SELECT id, name, email, phone, password_hash, has_visited 
-    FROM users 
-    WHERE (name = ? OR email = ?)
-    LIMIT 1
-  `;
+  const sql = `SELECT * FROM users WHERE (name = ? OR email = ?) LIMIT 1`;
   
   db.query(sql, [identifier, identifier], (err, results) => {
     if (err) {
