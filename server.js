@@ -218,6 +218,38 @@ app.get('/api/test', (req, res) => {
   res.json({ success: true, message: 'GET test endpoint working', timestamp: new Date().toISOString() });
 });
 
+// Simple debug endpoint - no database required
+app.get('/api/debug', (req, res) => {
+  console.log('🐛 Debug endpoint hit!');
+  try {
+    const debugInfo = {
+      success: true,
+      message: 'Debug endpoint working',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'not set',
+      hasDatabase: !!db,
+      hasSession: !!req.session,
+      sessionId: req.sessionID || 'none',
+      envVarsSet: {
+        DB_HOST: !!process.env.DB_HOST,
+        DB_USER: !!process.env.DB_USER,
+        DB_PASS: !!process.env.DB_PASS,
+        DB_NAME: !!process.env.DB_NAME,
+        SESSION_SECRET: !!process.env.SESSION_SECRET,
+        EMAIL_USER: !!process.env.EMAIL_USER
+      }
+    };
+    res.json(debugInfo);
+  } catch (err) {
+    console.error('❌ Debug endpoint error:', err);
+    res.status(500).json({
+      success: false,
+      error: 'Debug endpoint failed',
+      message: err.message
+    });
+  }
+});
+
 // Database status and health check endpoint
 app.get('/api/health', (req, res) => {
   console.log('🔍 Health check endpoint hit!');
@@ -339,37 +371,43 @@ app.get("/api/pricing/:serviceType", (req, res) => {
 });
 
 app.post("/api/signin", (req, res) => {
-  console.log('🔐 Sign-in attempt:', { identifier: req.body.identifier ? '***provided***' : 'missing' });
+  console.log('🔐 Sign-in attempt started');
+  console.log('🔐 Request body keys:', Object.keys(req.body || {}));
+  console.log('🔐 Session exists:', !!req.session);
+  console.log('🔐 Database exists:', !!db);
   
-  // Check database connection first
-  if (!db) {
-    console.error('❌ Database not connected for sign-in');
-    return res.status(503).json({ 
-      error: 'Database service unavailable. Please try again later.',
-      success: false 
-    });
-  }
-  
-  const { identifier, password } = req.body;
-  if (!identifier || !password) {
-    console.log('❌ Missing credentials in sign-in request');
-    return res.status(400).json({ error: "Name or email and password are required." });
-  }
-  
-  const sql = `
-    SELECT * FROM users 
-    WHERE (name = ? OR email = ?)
-    LIMIT 1
-  `;
-  
-  db.query(sql, [identifier, identifier], async (err, results) => {
-    if (err) {
-      console.error('❌ Database error during sign-in:', err);
-      return res.status(500).json({ 
-        error: 'Database error occurred. Please try again.',
+  try {
+    // Check database connection first
+    if (!db) {
+      console.error('❌ Database not connected for sign-in');
+      return res.status(503).json({ 
+        error: 'Database service unavailable. Please try again later.',
         success: false 
       });
     }
+    
+    const { identifier, password } = req.body;
+    if (!identifier || !password) {
+      console.log('❌ Missing credentials in sign-in request');
+      return res.status(400).json({ error: "Name or email and password are required." });
+    }
+    
+    console.log('🔐 About to query database...');
+    const sql = `
+      SELECT * FROM users 
+      WHERE (name = ? OR email = ?)
+      LIMIT 1
+    `;
+    
+    db.query(sql, [identifier, identifier], async (err, results) => {
+      try {
+        if (err) {
+          console.error('❌ Database error during sign-in:', err);
+          return res.status(500).json({ 
+            error: 'Database error occurred. Please try again.',
+            success: false 
+          });
+        }
     if (results.length === 0) {
       console.log('❌ User not found:', identifier);
       return res.status(401).json({ error: "Invalid credentials." });
@@ -443,7 +481,21 @@ app.post("/api/signin", (req, res) => {
         success: false 
       });
     }
-  });
+    } catch (callbackError) {
+      console.error('❌ Database callback error:', callbackError);
+      return res.status(500).json({ 
+        error: 'Authentication process failed. Please try again.',
+        success: false 
+      });
+    }
+    });
+  } catch (outerError) {
+    console.error('❌ Sign-in process error:', outerError);
+    return res.status(500).json({ 
+      error: 'Sign-in failed. Please try again.',
+      success: false 
+    });
+  }
 });
 
 // Check session status
