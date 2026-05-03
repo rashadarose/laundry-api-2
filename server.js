@@ -236,7 +236,8 @@ app.get('/api/debug', (req, res) => {
         DB_PASS: !!process.env.DB_PASS,
         DB_NAME: !!process.env.DB_NAME,
         SESSION_SECRET: !!process.env.SESSION_SECRET,
-        EMAIL_USER: !!process.env.EMAIL_USER
+        EMAIL_USER: !!process.env.EMAIL_USER,
+        STRIPE_SECRET_KEY: !!process.env.STRIPE_SECRET_KEY
       }
     };
     res.json(debugInfo);
@@ -248,6 +249,42 @@ app.get('/api/debug', (req, res) => {
       message: err.message
     });
   }
+});
+
+// Database schema debug endpoint
+app.get('/api/debug/schema', (req, res) => {
+  console.log('🔍 Schema debug endpoint hit!');
+  
+  if (!db) {
+    return res.status(503).json({ 
+      error: 'Database not connected',
+      success: false 
+    });
+  }
+  
+  // Check users table structure
+  db.query('DESCRIBE users', (err, userSchema) => {
+    if (err) {
+      console.error('❌ Error getting users schema:', err);
+      return res.status(500).json({ error: 'Schema check failed' });
+    }
+    
+    // Check for sample user data (anonymized)
+    db.query('SELECT COUNT(*) as total_users, COUNT(password_hash) as users_with_hash FROM users', (err2, stats) => {
+      if (err2) {
+        console.error('❌ Error getting user stats:', err2);
+        return res.status(500).json({ error: 'Stats check failed' });
+      }
+      
+      res.json({
+        success: true,
+        database: 'connected',
+        userTableSchema: userSchema,
+        userStats: stats[0],
+        message: 'Schema debug complete'
+      });
+    });
+  });
 });
 
 // Database status and health check endpoint
@@ -394,7 +431,8 @@ app.post("/api/signin", (req, res) => {
     
     console.log('🔐 About to query database...');
     const sql = `
-      SELECT * FROM users 
+      SELECT id, name, email, phone, password_hash, has_visited 
+      FROM users 
       WHERE (name = ? OR email = ?)
       LIMIT 1
     `;
@@ -404,9 +442,14 @@ app.post("/api/signin", (req, res) => {
         if (err) {
           console.error('❌ Database error during sign-in:', err);
           return res.status(500).json({ 
-            error: 'Database error occurred. Please try again.',
+            error: 'Database connection failed. Please try again.',
             success: false 
           });
+        }
+        
+        if (results.length === 0) {
+          console.log('❌ User not found:', identifier);
+          return res.status(401).json({ error: "Invalid credentials." });
         }
     if (results.length === 0) {
       console.log('❌ User not found:', identifier);
@@ -416,21 +459,33 @@ app.post("/api/signin", (req, res) => {
     const user = results[0];
     console.log('✅ User found, checking password...');
     
-    try {
-      const match = await bcrypt.compare(password, user.password_hash);
-      if (!match) {
-        console.log('❌ Password mismatch for user:', user.name);
-        return res.status(401).json({ error: "Invalid credentials." });
-      }
-      
-      console.log('✅ Password verified for user:', user.name);
-    } catch (bcryptError) {
-      console.error('❌ Bcrypt error:', bcryptError);
+    // CRITICAL: Check if password_hash exists before bcrypt
+    if (!user.password_hash) {
+      console.error('❌ Missing password_hash for user:', user.name || user.email);
       return res.status(500).json({ 
-        error: 'Authentication error. Please try again.',
+        error: 'User account corrupted. Please contact support.',
         success: false 
       });
     }
+    
+    // Safely compare password with try-catch
+    let match;
+    try {
+      match = await bcrypt.compare(password, user.password_hash);
+    } catch (bcryptError) {
+      console.error('❌ Bcrypt error for user:', user.name, 'Error:', bcryptError);
+      return res.status(500).json({ 
+        error: 'Authentication system error. Please try again.',
+        success: false 
+      });
+    }
+    
+    if (!match) {
+      console.log('❌ Password mismatch for user:', user.name);
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+    
+    console.log('✅ Password verified for user:', user.name);
     
     // Create session
     try {
@@ -815,10 +870,27 @@ app.post("/api/admin/signin", (req, res) => {
 });
 
 // Get order status
-app.get('/api/orders/:id/status', async (req, res) => {
-  const [rows] = await db.query('SELECT status FROM pickup_orders WHERE id = ?', [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
-  res.json({ status: rows[0].status });
+app.get('/api/orders/:id/status', (req, res) => {
+  console.log('🔍 Getting order status for ID:', req.params.id);
+  
+  if (!db) {
+    return res.status(503).json({ error: 'Database not connected' });
+  }
+  
+  db.query('SELECT status FROM pickup_orders WHERE id = ?', [req.params.id], (err, rows) => {
+    if (err) {
+      console.error('❌ Database error getting order status:', err);
+      return res.status(500).json({ error: 'Database error occurred' });
+    }
+    
+    if (rows.length === 0) {
+      console.log('❌ Order not found:', req.params.id);
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    console.log('✅ Order status retrieved:', rows[0].status);
+    res.json({ status: rows[0].status });
+  });
 });
 
 // Update order status
