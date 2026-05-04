@@ -643,123 +643,57 @@ app.put("/api/users/:id", (req, res) => {
 // Update your existing /api/pickups endpoint
 app.post("/api/pickups", (req, res) => {
   console.log('🚀 /api/pickups endpoint hit!');
-  console.log('📦 Full request body:', JSON.stringify(req.body, null, 2));
-  console.log('📝 Request headers:', req.headers);
+  console.log('📦 Request body:', req.body);
   
-  const { 
-    user_id, 
-    name, 
-    address, 
-    pickup_date, 
-    pickup_time, 
-    load_amount, 
-    dropoff_time, 
-    pricing_tier = 'self_wash',
-    weight_lbs = 10,
-    notes,
-    status = 'new' // Default to 'new' status
-  } = req.body;
-  status = req.body.status || 'new'
-  // Better error handling with specific missing fields
-  const requiredFields = {
-    user_id,
-    name,
-    address,
-    pickup_date,
-    pickup_time,
-    load_amount,
-    dropoff_time
-  };
+  // Simple variable extraction - NO const reassignment possible
+  let user_id = req.body.user_id;
+  let name = req.body.name; 
+  let address = req.body.address;
+  let pickup_date = req.body.pickup_date;
+  let pickup_time = req.body.pickup_time;
+  let load_amount = req.body.load_amount;
+  let dropoff_time = req.body.dropoff_time;
+  let pricing_tier = req.body.pricing_tier;
+  let weight_lbs = req.body.weight_lbs;
+  let notes = req.body.notes;
+  let status = req.body.status;
   
-  const missingFields = Object.keys(requiredFields).filter(key => {
-    const value = requiredFields[key];
-    const isMissing = value === undefined || value === null || value === '' || (typeof value === 'string' && value.trim() === '');
-    if (isMissing) {
-      console.log(`❌ Field '${key}' is missing. Value: ${JSON.stringify(value)}`);
-    }
-    return isMissing;
-  });
+  // Set defaults AFTER extraction to avoid any conflicts
+  if (!pricing_tier) pricing_tier = 'self_wash';
+  if (!weight_lbs) weight_lbs = 10;
+  if (!status) status = 'new';
   
-  if (missingFields.length > 0) {
-    console.log('❌ Missing required fields:', missingFields);
-    console.log('📝 Received data:', req.body);
-    return res.status(400).json({ 
-      error: "Required fields are missing.",
-      missingFields: missingFields,
-      receivedFields: Object.keys(req.body)
-    });
+  // Validation
+  if (!user_id || !name || !address || !pickup_date || !pickup_time || !load_amount || !dropoff_time) {
+    return res.status(400).json({ error: "Required fields missing" });
   }
-
-  // Get pricing information
-  db.query(
-    "SELECT price FROM pricing_tiers WHERE service_type = ? AND is_active = TRUE",
-    [pricing_tier],
-    (pricingErr, pricingResults) => {
-      if (pricingErr) return res.status(500).json({ error: pricingErr });
-      if (pricingResults.length === 0) {
-        return res.status(400).json({ error: 'Invalid pricing tier' });
+  
+  // Get pricing
+  db.query("SELECT price FROM pricing_tiers WHERE service_type = ? AND is_active = TRUE", [pricing_tier], (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (results.length === 0) return res.status(400).json({ error: 'Invalid pricing tier' });
+    
+    let unit_price = results[0].price;
+    let total_price = (unit_price * weight_lbs / 10).toFixed(2);
+    let confirm_number = Math.random().toString(36).substr(2, 9).toUpperCase();
+    
+    // Insert order
+    db.query(
+      `INSERT INTO pickup_orders (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes, status],
+      (insertErr, result) => {
+        if (insertErr) return res.status(500).json({ error: insertErr.message });
+        
+        res.status(201).json({
+          message: "Order created successfully",
+          pickupId: result.insertId,
+          confirm_number,
+          total_price: parseFloat(total_price),
+          success: true
+        });
       }
-
-      const unit_price = pricingResults[0].price;
-      const total_price = (unit_price * weight_lbs / 10).toFixed(2); // Price per 10lb bag
-      const confirm_number = generateComNumber();
-
-      const sql = `
-        INSERT INTO pickup_orders 
-        (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-      `;
-
-      db.query(
-        sql,
-        [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, 
-         pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes || null, status],
-        async (err, result) => {
-          if (err) {
-            console.error('SQL Error:', err);
-            return res.status(500).json({ error: err.message });
-          }
-
-          // Send confirmation email to admin
-          try {
-            await sendEmail(
-              'riseaboveamg@gmail.com',
-              'FoldNGo - New Order Received',
-              `New pickup order created!
-              
-Order Details:
-- Order ID: ${result.insertId}
-- Customer: ${name}
-- Address: ${address}
-- Pickup Date: ${pickup_date} at ${pickup_time}
-- Service: ${pricing_tier}
-- Weight: ${weight_lbs} lbs
-- Total Price: $${total_price}
-- Confirmation Number: ${confirm_number}
-- Status: ${status.toUpperCase()}
-- Notes: ${notes || 'None'}
-              `
-            );
-            console.log('✅ New order notification email sent to admin');
-          } catch (emailErr) {
-            console.error('❌ Admin notification email failed:', emailErr);
-          }
-
-          res.status(201).json({
-            message: "Pickup order created successfully",
-            pickupId: result.insertId,
-            confirm_number,
-            total_price: parseFloat(total_price),
-            pricing_tier,
-            unit_price,
-            status,
-            success: true
-          });
-        }
-      );
-    }
-  );
+    );
+  });
 });
 
 app.post("/api/checkout", async (req, res) => {
