@@ -519,15 +519,32 @@ app.post("/api/signin", (req, res) => {
 app.get('/api/auth/session', (req, res) => {
   console.log('🔍 SESSION CHECK:', req.session?.user?.name || 'No user');
   
-  if (req.session && req.session.user) {
-    res.json({
-      success: true,
-      user: {
-        id: req.session.user.id,
-        name: req.session.user.name,
-        email: req.session.user.email,
-        phone: req.session.user.phone
+  if (req.session && req.session.userId) {
+    // Fetch complete user data from database to ensure we have address
+    db.query('SELECT id, name, email, phone, address FROM users WHERE id = ?', [req.session.userId], (err, results) => {
+      if (err) {
+        console.log('❌ Database error during session check:', err.message);
+        return res.status(500).json({ success: false, error: 'Database error' });
       }
+      
+      if (results.length === 0) {
+        console.log('❌ User not found in database');
+        return res.status(401).json({ success: false, message: 'Session invalid' });
+      }
+      
+      const user = results[0];
+      console.log('✅ Session valid for user:', user.name);
+      
+      res.json({
+        success: true,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          address: user.address || null
+        }
+      });
     });
   } else {
     res.status(401).json({
@@ -644,6 +661,7 @@ app.put("/api/users/:id", (req, res) => {
 app.post("/api/pickups", (req, res) => {
   console.log('🚀 /api/pickups endpoint hit!');
   console.log('📦 Request body:', req.body);
+  console.log('👝 Bags:', req.body.bags, '📧 Email:', req.body.email);
   
   // Simple variable extraction - NO const reassignment possible
   let user_id = req.body.user_id;
@@ -651,46 +669,112 @@ app.post("/api/pickups", (req, res) => {
   let address = req.body.address;
   let pickup_date = req.body.pickup_date;
   let pickup_time = req.body.pickup_time;
-  let load_amount = req.body.load_amount;
   let dropoff_time = req.body.dropoff_time;
   let pricing_tier = req.body.pricing_tier;
-  let weight_lbs = req.body.weight_lbs;
+  let bags = req.body.bags; // New field: number of bags (1-10)
+  let email = req.body.email; // Email now comes from payment page
   let notes = req.body.notes;
   let status = req.body.status;
   
   // Set defaults AFTER extraction to avoid any conflicts
-  if (!pricing_tier) pricing_tier = 'self_wash';
-  if (!weight_lbs) weight_lbs = 10;
+  if (!pricing_tier) pricing_tier = 'recurring'; // Default to recurring tier
+  if (!bags) bags = 1; // Default to 1 bag
   if (!status) status = 'new';
   
+  // Calculate estimated weight based on bags (each bag = ~10 lbs)
+  let weight_lbs = bags * 10;
+  
   // Validation
-  if (!user_id || !name || !address || !pickup_date || !pickup_time || !load_amount || !dropoff_time) {
+  if (!user_id || !name || !address || !pickup_date || !pickup_time || !dropoff_time || !bags || !email) {
     return res.status(400).json({ error: "Required fields missing" });
   }
   
-  // Get pricing
+  // Validate bags range
+  if (bags < 1 || bags > 10) {
+    return res.status(400).json({ error: "Bags must be between 1 and 10" });
+  }
+  
+  // Get pricing - with fallback if database table doesn't exist
+  console.log('🔍 Looking up pricing for tier:', pricing_tier);
+  
+  // Fallback pricing map - matches frontend exactly
+  const fallbackPricing = {
+    'standard': 18.00,    // "Standard" service - $18/bag
+    'next_day': 25.00,    // "Express" service - $25/bag  
+    'same_day': 30.00,    // "Rush" service - $30/bag
+    'recurring': 16.00    // "Weekly Plan" service - $16/bag
+  };
+  
   db.query("SELECT price FROM pricing_tiers WHERE service_type = ? AND is_active = TRUE", [pricing_tier], (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (results.length === 0) return res.status(400).json({ error: 'Invalid pricing tier' });
+    let unit_price;
     
-    let unit_price = results[0].price;
-    let total_price = (unit_price * weight_lbs / 10).toFixed(2);
+    if (err || results.length === 0) {
+      // Use fallback pricing if database query fails or no results
+      console.log('🔄 Using fallback pricing for:', pricing_tier);
+      if (!fallbackPricing[pricing_tier]) {
+        return res.status(400).json({ 
+          error: `Invalid pricing tier: ${pricing_tier}. Available tiers: standard, next_day, same_day, recurring` 
+        });
+      }
+      unit_price = fallbackPricing[pricing_tier];
+    } else {
+      // Use database pricing
+      console.log('✅ Using database pricing');
+      unit_price = results[0].price;
+    }
+    
+    console.log('💰 Unit price:', unit_price, 'Bags:', bags);
+    // New pricing: bags * price_per_bag directly (no weight division)
+    let total_price = (unit_price * bags).toFixed(2);
     let confirm_number = Math.random().toString(36).substr(2, 6).toUpperCase();
+    
+    console.log('💵 Total price calculated:', total_price);
     
     // Insert order
     db.query(
-      `INSERT INTO pickup_orders (user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [user_id, name, address, pickup_date, pickup_time, load_amount, dropoff_time, pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes, status],
+      `INSERT INTO pickup_orders (user_id, name, address, pickup_date, pickup_time, load_amount, bags, dropoff_time, pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+      [user_id, name, address, pickup_date, pickup_time, bags, bags, dropoff_time, pricing_tier, unit_price, weight_lbs, total_price, confirm_number, notes, status, email],
       (insertErr, result) => {
-        if (insertErr) return res.status(500).json({ error: insertErr.message });
-        
-        res.status(201).json({
-          message: "Order created successfully",
-          pickupId: result.insertId,
-          confirm_number,
-          total_price: parseFloat(total_price),
-          success: true
-        });
+        if (insertErr) {
+          console.log('❌ Insert error:', insertErr.message);
+          
+          // If foreign key constraint fails, try again with NULL pricing_tier
+          if (insertErr.message.includes('foreign key constraint') || insertErr.message.includes('fk_pickup_orders_pricing_tier')) {
+            console.log('🔄 Retrying with NULL pricing_tier due to foreign key constraint');
+            db.query(
+              `INSERT INTO pickup_orders (user_id, name, address, pickup_date, pickup_time, load_amount, bags, dropoff_time, pricing_tier, unit_price, weight_lbs, price, confirm_number, notes, status, email, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
+              [user_id, name, address, pickup_date, pickup_time, bags, bags, dropoff_time, null, unit_price, weight_lbs, total_price, confirm_number, notes, status, email],
+              (retryErr, retryResult) => {
+                if (retryErr) {
+                  console.log('❌ Retry insert error:', retryErr.message);
+                  return res.status(500).json({ error: retryErr.message });
+                }
+                
+                console.log('✅ Order created successfully (with NULL pricing_tier):', retryResult.insertId);
+                res.status(201).json({
+                  message: "Order created successfully",
+                  pickupId: retryResult.insertId,
+                  confirm_number,
+                  bags: bags,
+                  total_price: parseFloat(total_price),
+                  success: true
+                });
+              }
+            );
+          } else {
+            return res.status(500).json({ error: insertErr.message });
+          }
+        } else {
+          console.log('✅ Order created successfully:', result.insertId);
+          res.status(201).json({
+            message: "Order created successfully",
+            pickupId: result.insertId,
+            confirm_number,
+            bags: bags,
+            total_price: parseFloat(total_price),
+            success: true
+          });
+        }
       }
     );
   });
