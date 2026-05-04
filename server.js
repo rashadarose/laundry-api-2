@@ -675,7 +675,7 @@ app.post("/api/pickups", (req, res) => {
     
     let unit_price = results[0].price;
     let total_price = (unit_price * weight_lbs / 10).toFixed(2);
-    let confirm_number = Math.random().toString(36).substr(2, 9).toUpperCase();
+    let confirm_number = Math.random().toString(36).substr(2, 6).toUpperCase();
     
     // Insert order
     db.query(
